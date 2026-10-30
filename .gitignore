@@ -1,0 +1,6 @@
+build/
+.DS_Store
+*.iconset/
+auto.crt
+auto.key
+build/

@@ -1,0 +1,26 @@
+
+  configuration:
+    --prefix=/usr/local
+    --arch=aarch64
+    --cc='clang -arch arm64'
+    --extra-cflags='-mmacosx-version-min=13.0'
+    --extra-ldflags='-arch arm64 -mmacosx-version-min=13.0'
+    --disable-autodetect
+    --disable-everything
+    --disable-doc
+    --disable-debug
+    --disable-ffplay
+    --disable-ffprobe
+    --enable-securetransport
+    --enable-videotoolbox
+    --enable-protocol='pipe,file,tcp,tls,rtmp,rtmps'
+    --enable-demuxer='mpegts,flv,aac,mp3,h264'
+    --enable-muxer='flv,mpegts,null'
+    --enable-parser='h264,aac,mpegaudio,opus,ac3'
+    --enable-decoder='h264,aac,aac_latm,mp3float,opus,ac3,wrapped_avframe,pcm_s16le,pcm_f32le,pcm_f64le'
+    --enable-encoder='aac,h264_videotoolbox'
+    --enable-bsf='aac_adtstoasc,h264_mp4toannexb,extract_extradata'
+    --enable-indev=lavfi
+    --enable-filter='testsrc,sine,aresample,aformat,format,scale,null,anull,buffer,buffersink,abuffer,abuffersink'
+
+Exiting with exit code 0
