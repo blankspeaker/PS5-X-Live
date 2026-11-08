@@ -125,7 +125,7 @@ Switch to this mode from the menu bar icon (**Mode: Twitch Relay**) and confirm 
 
 Sign in once. The app uses OAuth 2.0 Authorization Code with PKCE. That is the **OAuth 2.0 Client ID** and **Client Secret** on the app's keys page, not the OAuth 1.0a API Key, API Secret, or Access Token.
 
-When the PS5 broadcast is actually sending video, the app calls X's [Go Live](https://docs.x.com/livestream-api/broadcasts/go-live) endpoint (`POST /2/broadcasts`). If that source already has a live broadcast, X returns it and the app keeps feeding it. If not, X starts a new one. The menu shows **X: live** or **X: rejoined**.
+When the PS5 broadcast is actually sending video, the app calls X's [Go Live](https://docs.x.com/livestream-api/broadcasts/go-live) endpoint (`POST /2/broadcasts`). The X title is the title on your Twitch channel, which is the title you type on the PS5 before Go Live. The **Fallback title** in Settings is used only when that Twitch title can't be read. If that source already has a live broadcast with the same title, the app keeps feeding it. If the title is different, the app ends that broadcast and starts a new one so the PS5 title is what viewers see. The menu shows **X: live** or **X: rejoined**.
 
 1. In the [X developer console](https://console.x.com), create an app, or open the app whose keys you will paste. If that app already has a callback for something else, add another callback. Do not replace the one that other app uses.
 2. Open **Authentication settings** and set:

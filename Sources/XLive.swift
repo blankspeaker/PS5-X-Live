@@ -87,21 +87,86 @@ enum XLive {
     static func publish(title: String, announce: Bool, streamKey: String) -> GoLiveResult {
         let key = streamKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return .failed("Stream key missing") }
+        let chosen = chooseTitle(twitch: twitchBroadcastTitle(), fallback: title)
+        log("X title: \(chosen.isEmpty ? "(none)" : chosen)")
         do {
             let token = try accessToken()
             var source = try resolveSource(token: token, key: key)
-            let first = try postLive(token: token, source: source, title: title, announce: announce)
+            let first = try postLive(token: token, source: source, title: chosen, announce: announce)
             if case .failed = first, lastStatus == 404 {
                 Store.xSourceId = ""
                 Store.xSourceKeyTag = ""
                 source = try resolveSource(token: token, key: key)
-                return try finish(postLive(token: token, source: source, title: title, announce: announce),
+                return try finish(postLive(token: token, source: source, title: chosen, announce: announce),
                                    token: token, source: source)
+            }
+            if case .rejoined(let id, _) = first {
+                return try retitle(first, token: token, source: source, title: chosen, announce: announce, id: id)
             }
             return try finish(first, token: token, source: source)
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// A rejoin keeps the old title. End that broadcast and start another so the PS5 title is the one X shows.
+    private static func retitle(_ first: GoLiveResult, token: String, source: String, title: String, announce: Bool, id: String) throws -> GoLiveResult {
+        let wanted = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !wanted.isEmpty, let current = currentTitle(token: token, id: id), current != wanted else {
+            return try finish(first, token: token, source: source)
+        }
+        log("X title is \"\(current)\"; ending that broadcast so \"\(wanted)\" can replace it")
+        guard endBroadcast(token: token, id: id) else {
+            return try finish(first, token: token, source: source)
+        }
+        return try finish(postLive(token: token, source: source, title: wanted, announce: announce),
+                           token: token, source: source)
+    }
+
+    /// Login from a channel name or a twitch.tv URL. Empty when it isn't a Twitch channel.
+    static func twitchLogin(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("https://") { s.removeFirst(8) }
+        else if s.hasPrefix("http://") { s.removeFirst(7) }
+        if s.hasPrefix("www.") { s.removeFirst(4) }
+        if s.hasPrefix("m.") { s.removeFirst(2) }
+        if let range = s.range(of: "twitch.tv/") { s = String(s[range.upperBound...]) }
+        if s.hasPrefix("@") { s.removeFirst() }
+        s = s.split(separator: "/").first.map(String.init) ?? s
+        s = s.split(separator: "?").first.map(String.init) ?? s
+        let login = s.lowercased()
+        let ok = !login.isEmpty && login.count <= 25 && login.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+        return ok ? login : nil
+    }
+
+    /// The PS5 title wins. The Settings title is only used when Twitch has none.
+    static func chooseTitle(twitch: String?, fallback: String) -> String {
+        let fromPS5 = twitch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let spare = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((fromPS5.isEmpty ? spare : fromPS5).prefix(200))
+    }
+
+    /// The title currently set on the Twitch channel, which is what the PS5 broadcast screen writes.
+    private static func twitchBroadcastTitle() -> String? {
+        guard let login = twitchLogin(Store.channel) else { return nil }
+        let query = "query($login:String!){user(login:$login){broadcastSettings{title}}}"
+        let payload: [String: Any] = ["query": query, "variables": ["login": login]]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload),
+              let url = URL(string: "https://gql.twitch.tv/gql") else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 8
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("kimne78kx3ncx6brgo4mv6wki5h1ko", forHTTPHeaderField: "Client-ID")
+        req.httpBody = body
+        let (status, data) = perform(req)
+        guard status == 200,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let user = (root["data"] as? [String: Any])?["user"] as? [String: Any],
+              let settings = user["broadcastSettings"] as? [String: Any],
+              let title = settings["title"] as? String else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: - Pure helpers (covered by --selftest)
@@ -158,6 +223,10 @@ enum XLive {
         } else { check("403 fails", false) }
         check("match", matchingSource(want: "live_abc", pairs: [("1", "other"), ("2", "live_abc")]) == "2")
         check("no match", matchingSource(want: "nope", pairs: [("1", "other")]) == nil)
+        check("twitch login", twitchLogin("https://www.twitch.tv/Octodad") == "octodad")
+        check("twitch login bare", twitchLogin("@octodad") == "octodad")
+        check("prefer twitch title", chooseTitle(twitch: "From PS5", fallback: "Settings") == "From PS5")
+        check("fallback title", chooseTitle(twitch: "  ", fallback: "Settings") == "Settings")
         if ok { print("ok") }
         return ok
     }
@@ -289,6 +358,26 @@ enum XLive {
         let ids = rows.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }
         guard !ids.isEmpty else { throw XFail("No X sources on this account. Create one in X Live Studio.") }
         return ids
+    }
+
+    private static func currentTitle(token: String, id: String) -> String? {
+        guard let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        let (status, root) = get("/2/broadcasts/\(escaped)?broadcast.fields=title", token: token)
+        guard status == 200, let data = root["data"] as? [String: Any] else { return nil }
+        let title = (data["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return title.isEmpty ? nil : title
+    }
+
+    private static func endBroadcast(token: String, id: String) -> Bool {
+        guard let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://api.x.com/2/broadcasts/\(escaped)/state") else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data(#"{"state":"END"}"#.utf8)
+        let (status, _) = perform(req)
+        return status == 200
     }
 
     private static func streamKey(token: String, id: String) -> String? {
