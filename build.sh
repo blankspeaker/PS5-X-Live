@@ -10,7 +10,7 @@ rm -rf "$APP" build/PS5-X-Live.zip
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # Apple silicon only.
-xcrun swiftc -O -target arm64-apple-macos13.0 Sources/main.swift -o "$APP/Contents/MacOS/PS5XLive"
+xcrun swiftc -O -target arm64-apple-macos13.0 Sources/XLive.swift Sources/main.swift -o "$APP/Contents/MacOS/PS5XLive"
 
 R="$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
