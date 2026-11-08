@@ -16,7 +16,7 @@ Both modes copy video and audio as-is, with no re-encoding, so they use almost n
 
 **Nothing else to install.** FFmpeg (with OpenSSL), MediaMTX, Streamlink and the Python it runs on are bundled inside the app.
 
-- Menu bar only (no Dock icon): **Start Relay**, **Stop Relay**, status, mode toggle, **Settings…**, **Setup Guide…**, **Open Log**, **Open X Live Studio**, **Help**, **About / Licenses**, **Quit**.
+- Menu bar only (no Dock icon): **Start Relay**, **Stop Relay**, status, mode toggle, **Auto go live on X**, **Open at Login**, **Settings…**, **Setup Guide…**, **Open Log**, **Open X Live Studio**, **Help**, **About / Licenses**, **Quit**.
 - **Setup Guide…** has a button for every link in the steps below.
 - Your stream key is stored in the macOS Keychain.
 - Reconnects automatically if the stream drops.
@@ -44,7 +44,7 @@ The app is ad-hoc signed, not notarized by Apple, so macOS blocks the first laun
 
 After that it opens normally. The **Setup Guide** opens and step **1. Components** shows green checks for the bundled tools. There's nothing to install. If a component shows a red mark, the guide offers the Homebrew fallback (`brew install streamlink ffmpeg`); the relay uses Homebrew's tools only when the bundled ones can't run.
 
-To start it automatically, add it in [Login Items](x-apple.systempreferences:com.apple.LoginItems-Settings.extension) (**System Settings → General → Login Items**).
+Choose **Open at Login** in the menu bar to start the app when you sign in. macOS may ask you to allow it under **System Settings → General → Login Items**. **Start Relay** is remembered: leave it on and the next launch (including after a reboot) turns it back on. **Stop Relay** is what turns that off. **Quit** stops the processes, and the next launch resumes the relay if you had not pressed Stop.
 
 **PS5 X Live opens in Direct from PS5 (LAN) mode by default.** You can switch to Twitch Relay from the menu bar icon; a confirmation and the risk note appear when you do.
 
@@ -75,7 +75,9 @@ The same two rows also appear under **RTMP details** in the **Create Livestream*
 
 Keep the stream key private. Anyone with it can stream to your source.
 
-Then open **Settings…** in the app and paste the **Server URL** (the RTMP URL) and **Stream key**. (X username is optional; it enables the **Your X Profile** button.) Click **Save**.
+Then open **Settings…** in the app and paste the **Server URL** (the RTMP URL) and **Stream key**. Use the **Paste** button next to a field, or **Edit → Paste**. (X username is filled in when you sign in; it enables the **Your X Profile** button.) Click **Save**.
+
+The stream key, X client secret, and sign-in tokens stay in the macOS Keychain. The log masks stream keys and bearer tokens. This repository does not contain a stream key, client secret, or account token. The pictures in `docs/` have those fields blurred.
 
 ## Direct from PS5 (LAN) mode — recommended
 
@@ -90,9 +92,13 @@ Setup (the app's **Setup Guide** shows these with your Mac's IP filled in):
 1. Enter your X source's RTMP URL and stream key in **Settings…** (see [Create a source in X Live Studio](#create-a-source-in-x-live-studio)).
 2. On the PS5: **Settings → Network → Settings → Set Up Internet Connection → your network → Advanced Settings → DNS Settings → Manual**. Set **Primary DNS** to the Mac IP shown in the app and **Secondary DNS** to `0.0.0.0`. (Exact menu labels vary by PS5 software version.)
 3. In the app choose **Start Relay**, then on the PS5 press **Create → Broadcast → Twitch → Go Live**.
-4. Go live on X (see [Go live on X](#go-live-on-x)).
+4. The app goes live on X when the PS5's video arrives (see [Go live on X](#go-live-on-x)).
 
 Revert when done: choose **Stop Relay** in the app (the PS5 can then reach Twitch normally again). You can leave the PS5's DNS set to the Mac; with the relay stopped it simply passes through. To stop pointing at the Mac entirely, set the PS5's **DNS Settings** back to **Automatic**.
+
+### Also send to Twitch (simulcast)
+
+In **Direct from PS5 (LAN)** mode you can optionally forward the same broadcast to your own Twitch channel at the same time as X. Turn on **Also send to Twitch** in the menu (off by default). While it is on, the relay sends a second copy-only push to Twitch's ingest using the key your PS5 is already broadcasting with — it is your own stream to your own channel, not a restream. The two pushes are independent: if one drops, the other keeps going and the dropped one reconnects on its own. The menu shows **Twitch: sending** or **Twitch: error** so you can see its state.
 
 ## Twitch Relay mode (opt-in)
 
@@ -113,28 +119,33 @@ Switch to this mode from the menu bar icon (**Mode: Twitch Relay**) and confirm 
    | Red antenna | Relaying to X |
 
    You can start the relay before or after the PS5 goes live; it waits for Twitch. Check your stream at `https://www.twitch.tv/<your channel>` (**Your Twitch Channel** in the Setup Guide).
-4. Go live on X (see [Go live on X](#go-live-on-x)).
+4. The app goes live on X when the PS5's video arrives (see [Go live on X](#go-live-on-x)).
 
 ## Go live on X
 
-Start the relay first, so your source shows a green dot or **Connected** in X Live Studio.
+Sign in once. The app uses OAuth 2.0 Authorization Code with PKCE. That is the **OAuth 2.0 Client ID** and **Client Secret** on the app's keys page, not the OAuth 1.0a API Key, API Secret, or Access Token.
 
-1. In [X Live Studio](https://x.com/i/live-studio), click **New Livestream**. In the **Create Livestream** dialog, keep **Now** selected at the bottom left.
-2. **Details**: enter a **Title** and choose your source in the **Source** dropdown (it has a green dot when connected).
+When the PS5 broadcast is actually sending video, the app calls X's [Go Live](https://docs.x.com/livestream-api/broadcasts/go-live) endpoint (`POST /2/broadcasts`). If that source already has a live broadcast, X returns it and the app keeps feeding it. If not, X starts a new one. The menu shows **X: live** or **X: rejoined**.
 
-   ![Create Livestream](docs/06-create-livestream.png)
+1. In the [X developer console](https://console.x.com), create an app, or open the app whose keys you will paste. If that app already has a callback for something else, add another callback. Do not replace the one that other app uses.
+2. Open **Authentication settings** and set:
+   - **App permissions:** Read and write. Read and write and Direct message is fine too. Read alone cannot go live.
+   - **Type of App:** Web App, Automated App or Bot when the app has a Client Secret. Choose Native App and leave Client Secret blank when it does not.
+   - **Callback URI / Redirect URL,** exactly: `http://127.0.0.1:17351/callback`
+   - **Website URL:** any URL you control. The GitHub repo is fine.
+3. On the keys page, copy the **OAuth 2.0 Client ID** and **Client Secret**.
+4. In **Settings…**, use **Paste** for **X Client ID** and **X Client Secret**. Optional: a **Livestream title**. Click **Sign in to X**.
+5. On X's page, check **I trust this app** and choose **Authorize app**. Settings should then say **Signed in as @yourname**.
+6. Leave **Auto go live on X** on (it is on by default). **Post when going live** posts the announcement; turn it off to skip that post.
+7. Choose **Start Relay**, then start the broadcast on the PS5. The app waits until video is flowing, then goes live. A pause of a few seconds keeps the same X broadcast. After X has had no video for about five minutes it ends the broadcast, and the next share starts a new one.
 
-3. Optional: **Thumbnail**; **Audience** (Visibility **Public** or **Private**, **Chat**, **Geo-restrictions**); **Post** (the text of the announcement post).
+The sign-in asks only for `broadcast.read`, `broadcast.write`, `offline.access` and `users.read`. X shows **You weren't able to give access to the App** when the callback is not saved exactly, or when the request asks for a scope that app cannot grant. A Client ID from a different app fails the same way until that app's callback list includes `http://127.0.0.1:17351/callback`.
 
-   ![Audience](docs/08-audience.png)
+You can still go live by hand in [X Live Studio](https://x.com/i/live-studio) (**New Livestream** → **Now** → **Go Live**). The app will rejoin that broadcast instead of creating another one.
 
-4. Click **Next** through the steps, then click **Go Live**.
+Check the broadcast on your X profile (`https://x.com/<your username>`, or **Your X Profile** in the Setup Guide), or choose **Open Current Broadcast**.
 
-To schedule instead, choose **Later**. That adds a **Date & Time** step with **Auto-start**, and the final button becomes **Schedule**.
-
-Check the broadcast on your X profile (`https://x.com/<your username>`, or **Your X Profile** in the Setup Guide).
-
-To finish: end the broadcast in X Live Studio, choose **Stop Relay**, and stop the broadcast on the PS5 (**Create → Broadcast → Stop Broadcasting**). **Quit** also stops the relay.
+To finish: stop the broadcast on the PS5 (**Create → Broadcast → Stop Broadcasting**). Choose **Stop Relay** when you don't want it to come back on the next launch. X ends the broadcast on its own after video has been gone for about five minutes; you can also end it in X Live Studio. **Quit** stops the relay processes and leaves the remembered on/off state alone.
 
 ## Latency
 
@@ -159,7 +170,8 @@ Open the log from the menu (**Open Log**), or at `~/Library/Logs/PS5-X-Live.log`
 | Twitch Relay: stuck on **Waiting for Twitch** | Make sure the PS5 broadcast is live on your Twitch channel page. Check the channel name in **Settings…**. |
 | PS5 broadcast stuck on "preparing" | Turn on two-factor authentication for your Twitch account, then relink Twitch on the PS5 ([twitch.tv/activate](https://www.twitch.tv/activate)). |
 | Log shows `Connection refused`, `Input/output error` or a server error | Recheck the server URL and stream key in **Settings…**; copy them again from **Encoder setup** in [Manage Sources](https://x.com/i/live-studio/sources). |
-| **Relaying to X** but nothing on X | Create the livestream and click **Go Live** in [X Live Studio](https://x.com/i/live-studio); the relay only feeds the source. |
+| **Relaying to X** but nothing on X | Sign in under **Settings…** and leave **Auto go live on X** on. The menu line **X:** shows the error. You can still click **Go Live** in [X Live Studio](https://x.com/i/live-studio); the relay feeds the source either way. |
+| X says **You weren't able to give access to the App** | The callback on that X app must be exactly `http://127.0.0.1:17351/callback`, permissions must be Read and write, and the Client ID must be the OAuth 2.0 Client ID from that same app. See [Go live on X](#go-live-on-x). |
 | Source isn't green / **Connected** | Start the relay and wait, then reopen the **Source** dropdown. |
 | Stuttering or buffering | Use wired Ethernet for the PS5 and the Mac, or lower the PS5 broadcast quality. |
 | macOS asks for Keychain access | Choose **Always Allow**. Ad-hoc signed builds may ask again after an update. |
@@ -188,7 +200,7 @@ open "build/PS5 X Live.app"
 - CPython 3.13 from [python-build-standalone](https://github.com/astral-sh/python-build-standalone)
 - Streamlink and its dependencies from PyPI, pinned by hash in `scripts/requirements-runtime.txt`
 
-Then `build.sh` compiles `Sources/main.swift` with `swiftc` for arm64, copies the relay script, DNS server, runtime and license files into the app, ad-hoc signs every nested executable and the app, and writes `build/PS5-X-Live.zip`.
+Then `build.sh` compiles `Sources/XLive.swift` and `Sources/main.swift` with `swiftc` for arm64, copies the relay script, DNS server, runtime and license files into the app, ad-hoc signs every nested executable and the app, and writes `build/PS5-X-Live.zip`.
 
 ## Licenses and third-party software
 

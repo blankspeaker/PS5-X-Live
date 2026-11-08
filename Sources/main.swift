@@ -1,5 +1,6 @@
 import Cocoa
 import Security
+import ServiceManagement
 
 // MARK: - Settings
 
@@ -22,6 +23,12 @@ enum Store {
     }
     static var lanMode: Bool { mode == "lan" }
 
+    // "Also send to Twitch" simulcast (LAN mode only). Off by default for new installs.
+    static var simulcast: Bool {
+        get { defaults.bool(forKey: "simulcastTwitch") }
+        set { defaults.set(newValue, forKey: "simulcastTwitch") }
+    }
+
     static var channel: String {
         get { defaults.string(forKey: "twitchChannel") ?? "" }
         set { defaults.set(newValue, forKey: "twitchChannel") }
@@ -36,29 +43,75 @@ enum Store {
         set { defaults.set(newValue, forKey: "xUsername") }
     }
 
+    /// Left on by Start Relay and cleared by Stop Relay. Survives quit and reboot.
+    static var relayWanted: Bool {
+        get { defaults.bool(forKey: "relayWanted") }
+        set { defaults.set(newValue, forKey: "relayWanted") }
+    }
+    static var autoLive: Bool {
+        get { defaults.object(forKey: "autoLive") == nil ? true : defaults.bool(forKey: "autoLive") }
+        set { defaults.set(newValue, forKey: "autoLive") }
+    }
+    static var announce: Bool {
+        get { defaults.object(forKey: "announcePost") == nil ? true : defaults.bool(forKey: "announcePost") }
+        set { defaults.set(newValue, forKey: "announcePost") }
+    }
+    static var liveTitle: String {
+        get { defaults.string(forKey: "liveTitle") ?? "" }
+        set { defaults.set(newValue, forKey: "liveTitle") }
+    }
+    static var xClientID: String {
+        get { defaults.string(forKey: "xClientID") ?? "" }
+        set { defaults.set(newValue, forKey: "xClientID") }
+    }
+    static var xSourceId: String {
+        get { defaults.string(forKey: "xSourceId") ?? "" }
+        set { defaults.set(newValue, forKey: "xSourceId") }
+    }
+    static var xSourceKeyTag: String {
+        get { defaults.string(forKey: "xSourceKeyTag") ?? "" }
+        set { defaults.set(newValue, forKey: "xSourceKeyTag") }
+    }
+    static var shareURL: String {
+        get { defaults.string(forKey: "xShareURL") ?? "" }
+        set { defaults.set(newValue, forKey: "xShareURL") }
+    }
+    static var tokenExpiry: Double {
+        get { defaults.double(forKey: "xTokenExpiry") }
+        set { defaults.set(newValue, forKey: "xTokenExpiry") }
+    }
+    static var xClientSecret: String {
+        get { secret("x-client-secret") }
+        set { setSecret("x-client-secret", newValue, label: "PS5 X Live X client secret") }
+    }
+
     static var key: String {
-        get {
-            let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: keyService,
-                                    kSecAttrAccount as String: account,
-                                    kSecReturnData as String: true,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-            var out: CFTypeRef?
-            guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-                  let d = out as? Data else { return "" }
-            return String(data: d, encoding: .utf8) ?? ""
-        }
-        set {
-            let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                       kSecAttrService as String: keyService,
-                                       kSecAttrAccount as String: account]
-            SecItemDelete(base as CFDictionary)
-            guard !newValue.isEmpty else { return }
-            var add = base
-            add[kSecValueData as String] = Data(newValue.utf8)
-            add[kSecAttrLabel as String] = "PS5 X Live stream key"
-            SecItemAdd(add as CFDictionary, nil)
-        }
+        get { secret(account) }
+        set { setSecret(account, newValue, label: "PS5 X Live stream key") }
+    }
+
+    static func secret(_ account: String) -> String {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                kSecAttrService as String: keyService,
+                                kSecAttrAccount as String: account,
+                                kSecReturnData as String: true,
+                                kSecMatchLimit as String: kSecMatchLimitOne]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let d = out as? Data else { return "" }
+        return String(data: d, encoding: .utf8) ?? ""
+    }
+
+    static func setSecret(_ account: String, _ value: String, label: String) {
+        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: keyService,
+                                   kSecAttrAccount as String: account]
+        SecItemDelete(base as CFDictionary)
+        guard !value.isEmpty else { return }
+        var add = base
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrLabel as String] = label
+        SecItemAdd(add as CFDictionary, nil)
     }
 
     // LAN mode receives the PS5's own broadcast, so it needs no Twitch channel.
@@ -81,6 +134,7 @@ enum Links {
     static let ps5Broadcast = "https://www.playstation.com/en-us/support/games/ps5-stream-gameplay-broadcast/"
     static let liveStudio = "https://x.com/i/live-studio"
     static let sources = "https://x.com/i/live-studio/sources"
+    static let console = "https://console.x.com"
     static let notices = repo + "/blob/main/THIRD_PARTY_NOTICES.md"
     static let loginItems = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
     static var xProfile: String? { Store.xUser.isEmpty ? nil : "https://x.com/" + Store.xUser }
@@ -137,46 +191,102 @@ func missingTools() -> [String] { checkComponents().filter { !$0.ok }.map(\.name
 
 // MARK: - Settings window
 
-final class SettingsWindow: NSWindowController {
+/// Menu-bar apps are not key by default, so text fields ignore typing and Command-V.
+final class KeyWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+final class SettingsWindow: NSWindowController, NSWindowDelegate {
     let channel = NSTextField()
     let server = NSTextField()
     let key = NSSecureTextField()
     let xUser = NSTextField()
+    let liveTitle = NSTextField()
+    let clientID = NSTextField()
+    let clientSecret = NSSecureTextField()
+    let xAuthStatus = NSTextField(labelWithString: "Not signed in")
     var onSave: (() -> Void)?
+    var onAccount: (() -> Void)?
+    private var signingIn = false
 
     convenience init() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 200),
-                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let w = KeyWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "PS5 X Live"
         self.init(window: w)
+        w.delegate = self
         channel.placeholderString = "channel or twitch.tv URL"
         server.placeholderString = "rtmps://"
         key.placeholderString = "Stream key"
-        xUser.placeholderString = "Optional"
-        for f in [channel, server, key, xUser] as [NSTextField] { f.widthAnchor.constraint(equalToConstant: 300).isActive = true }
+        xUser.placeholderString = "Filled in when you sign in"
+        liveTitle.placeholderString = "Optional"
+        clientID.placeholderString = "From your X app"
+        clientSecret.placeholderString = "Blank for a public client"
+        for f in [channel, server, key, xUser, liveTitle, clientID, clientSecret] as [NSTextField] {
+            f.widthAnchor.constraint(equalToConstant: 320).isActive = true
+            f.isEditable = true
+            f.isSelectable = true
+            f.refusesFirstResponder = false
+        }
+        let pasteID = NSButton(title: "Paste", target: self, action: #selector(pasteClientID))
+        let pasteSecret = NSButton(title: "Paste", target: self, action: #selector(pasteClientSecret))
+        for b in [pasteID, pasteSecret] { b.bezelStyle = .rounded; b.controlSize = .small }
+        let idRow = NSStackView(views: [clientID, pasteID])
+        let secretRow = NSStackView(views: [clientSecret, pasteSecret])
+        idRow.spacing = 8
+        secretRow.spacing = 8
 
         let grid = NSGridView(views: [
             [NSTextField(labelWithString: "Twitch channel"), channel],
             [NSTextField(labelWithString: "Server URL"), server],
             [NSTextField(labelWithString: "Stream key"), key],
             [NSTextField(labelWithString: "X username"), xUser],
+            [NSTextField(labelWithString: "Livestream title"), liveTitle],
+            [NSTextField(labelWithString: "X Client ID"), idRow],
+            [NSTextField(labelWithString: "X Client Secret"), secretRow],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowSpacing = 10
         grid.columnSpacing = 10
+        grid.setContentHuggingPriority(.required, for: .vertical)
+        grid.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let hint = NSTextField(wrappingLabelWithString: "OAuth 2.0, not the API Key. In User authentication settings: permissions Read and write, callback exactly \(XLive.redirect), scopes \(XLive.scopes). A mismatch is the “weren’t able to give access” page.")
+        hint.preferredMaxLayoutWidth = 460
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        hint.setContentHuggingPriority(.required, for: .vertical)
+
+        let signIn = NSButton(title: "Sign in to X", target: self, action: #selector(signIn))
+        let signOut = NSButton(title: "Sign out", target: self, action: #selector(signOut))
+        let copyCallback = NSButton(title: "Copy callback URL", target: self, action: #selector(copyCallback))
+        let accountButtons = NSStackView(views: [signIn, signOut, copyCallback, xAuthStatus])
+        accountButtons.spacing = 8
+        accountButtons.alignment = .centerY
 
         let save = NSButton(title: "Save", target: self, action: #selector(save))
         save.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
-        let buttons = NSStackView(views: [cancel, save])
+        let buttonGap = NSView()
+        buttonGap.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [buttonGap, cancel, save])
+        buttons.spacing = 8
 
-        let stack = NSStackView(views: [grid, buttons])
+        let stack = NSStackView(views: [grid, hint, accountButtons, buttons])
         stack.orientation = .vertical
-        stack.alignment = .trailing
+        stack.alignment = .leading
+        stack.distribution = .fill
         stack.spacing = 16
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        stack.setHuggingPriority(.required, for: .horizontal)
+        stack.setHuggingPriority(.required, for: .vertical)
+        for row in [hint, accountButtons, buttons] {
+            row.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true
+        }
         w.contentView = stack
+        w.setContentSize(stack.fittingSize)
         w.center()
     }
 
@@ -185,8 +295,44 @@ final class SettingsWindow: NSWindowController {
         server.stringValue = Store.server
         key.stringValue = Store.key
         xUser.stringValue = Store.xUser
+        liveTitle.stringValue = Store.liveTitle
+        clientID.stringValue = Store.xClientID
+        clientSecret.stringValue = Store.xClientSecret
+        xAuthStatus.stringValue = XLive.signedIn
+            ? (Store.xUser.isEmpty ? "Signed in" : "Signed in as @\(Store.xUser)")
+            : "Not signed in"
+        // Accessory apps ignore Command-V until they become a normal foreground app.
+        if let stack = window?.contentView as? NSStackView {
+            window?.setContentSize(stack.fittingSize)
+        }
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(clientID)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        DispatchQueue.main.async {
+            if !NSApp.windows.contains(where: { $0.isVisible }) {
+                NSApp.setActivationPolicy(.accessory)
+            }
+        }
+    }
+
+    @objc func pasteClientID() { pasteClipboard(into: clientID, name: "Client ID") }
+    @objc func pasteClientSecret() { pasteClipboard(into: clientSecret, name: "Client Secret") }
+
+    func pasteClipboard(into field: NSTextField, name: String) {
+        let text = (NSPasteboard.general.string(forType: .string) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            xAuthStatus.stringValue = "Clipboard is empty. Copy the \(name) first."
+            NSSound.beep()
+            return
+        }
+        field.stringValue = text
+        window?.makeFirstResponder(field)
+        xAuthStatus.stringValue = "Pasted \(name) (\(text.count) characters)"
     }
 
     func fail(_ msg: String, _ field: NSTextField) {
@@ -209,12 +355,53 @@ final class SettingsWindow: NSWindowController {
         if let r = u.range(of: "x.com/") ?? u.range(of: "twitter.com/") { u = String(u[r.upperBound...]) }
         u = String(u.drop(while: { $0 == "@" }).prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" }))
         Store.xUser = u
+        Store.liveTitle = liveTitle.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        Store.xClientID = clientID.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        Store.xClientSecret = clientSecret.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         window?.close()
         onSave?()
         onSave = nil
     }
 
     @objc func cancel() { onSave = nil; window?.close() }
+
+    @objc func copyCallback() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(XLive.redirect, forType: .string)
+    }
+
+    @objc func signIn() {
+        guard !signingIn else { return }
+        let id = clientID.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard id.count >= 15 else {
+            return fail("Client ID looks incomplete (\(id.count) characters). Paste the full OAuth 2.0 Client ID.", clientID)
+        }
+        signingIn = true
+        Store.xClientID = id
+        Store.xClientSecret = clientSecret.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        xAuthStatus.stringValue = "Waiting for X in your browser…"
+        DispatchQueue.global().async {
+            let msg = XLive.signIn()
+            DispatchQueue.main.async {
+                self.signingIn = false
+                self.xAuthStatus.stringValue = msg
+                if XLive.signedIn { self.xUser.stringValue = Store.xUser }
+                else if msg.hasPrefix("X refused") {
+                    let a = NSAlert()
+                    a.messageText = "X refused access"
+                    a.informativeText = msg
+                    a.runModal()
+                }
+                self.onAccount?()
+            }
+        }
+    }
+
+    @objc func signOut() {
+        XLive.signOut()
+        xAuthStatus.stringValue = "Signed out"
+        onAccount?()
+    }
 }
 
 // MARK: - Setup guide
@@ -254,7 +441,7 @@ final class GuideWindow: NSWindowController {
     var startRelay: () -> Void = {}
 
     convenience init() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "PS5 X Live Setup"
         self.init(window: w)
@@ -304,11 +491,18 @@ final class GuideWindow: NSWindowController {
                 ("    Primary DNS = the Mac IP above, Secondary DNS = 0.0.0.0", []),
                 ("5. Start LAN mode, then broadcast to Twitch on the PS5", [
                     button("Start Relay") { [weak self] in self?.startRelay() }]),
-                ("6. Go live on X", [
-                    link("X Live Studio") { Links.liveStudio }, link("Your X Profile") { Links.xProfile }]),
+                ("    Optional: turn on \"Also send to Twitch\" in the menu to simulcast to your own Twitch channel", []),
+                ("6. Sign in with the OAuth 2.0 Client ID, not the API Key", [
+                    link("Developer Console") { Links.console },
+                    button("Settings…") { [weak self] in self?.openSettings() },
+                    link("Your X Profile") { Links.xProfile }]),
+                ("    Permissions: Read and write. Callback exactly http://127.0.0.1:17351/callback.", []),
+                ("    Paste the Client ID and Client Secret, then Sign in to X. A running broadcast is rejoined.", []),
+                ("    Open at Login and Start Relay stay on across reboots until you choose Stop Relay.", []),
                 ("When done: on the PS5 set DNS Settings back to Automatic", []),
                 ("Help", [
-                    link("README") { Links.readme }, link("Report an Issue") { Links.issues }]),
+                    link("README") { Links.readme }, link("Report an Issue") { Links.issues },
+                    link("Login Items") { Links.loginItems }]),
             ]
         } else {
             steps = [
@@ -324,8 +518,13 @@ final class GuideWindow: NSWindowController {
                 ("5. Start the relay", [
                     button("Start Relay") { [weak self] in self?.startRelay() },
                     link("Your Twitch Channel") { Links.twitchChannel }]),
-                ("6. Go live on X", [
-                    link("X Live Studio") { Links.liveStudio }, link("Your X Profile") { Links.xProfile }]),
+                ("6. Sign in with the OAuth 2.0 Client ID, not the API Key", [
+                    link("Developer Console") { Links.console },
+                    button("Settings…") { [weak self] in self?.openSettings() },
+                    link("Your X Profile") { Links.xProfile }]),
+                ("    Permissions: Read and write. Callback exactly http://127.0.0.1:17351/callback.", []),
+                ("    Paste the Client ID and Client Secret, then Sign in to X. A running broadcast is rejoined.", []),
+                ("    Open at Login and Start Relay stay on across reboots until you choose Stop Relay.", []),
                 ("Help", [
                     link("README") { Links.readme }, link("Report an Issue") { Links.issues },
                     link("Login Items") { Links.loginItems }]),
@@ -412,6 +611,13 @@ final class App: NSObject, NSApplicationDelegate {
     let statusLine = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     let lanLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let twitchWarn = NSMenuItem(title: "⚠ Twitch Relay: use at your own risk (may violate Twitch ToS)", action: nil, keyEquivalent: "")
+    let twitchLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    let xLine = NSMenuItem(title: "X: idle", action: nil, keyEquivalent: "")
+    lazy var broadcastItem = NSMenuItem(title: "Open Current Broadcast", action: #selector(openBroadcast), keyEquivalent: "")
+    lazy var alsoTwitch = NSMenuItem(title: "Also send to Twitch", action: #selector(toggleSimulcast), keyEquivalent: "")
+    lazy var autoLiveItem = NSMenuItem(title: "Auto go live on X", action: #selector(toggleAutoLive), keyEquivalent: "")
+    lazy var announceItem = NSMenuItem(title: "Post when going live", action: #selector(toggleAnnounce), keyEquivalent: "")
+    lazy var loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
     lazy var modeTwitch = NSMenuItem(title: "Mode: Twitch Relay", action: #selector(setTwitch), keyEquivalent: "")
     lazy var modeLan = NSMenuItem(title: "Mode: Direct from PS5 (LAN) — recommended", action: #selector(setLan), keyEquivalent: "")
     lazy var copyIP = NSMenuItem(title: "Copy Mac IP for PS5", action: #selector(copyLanIP), keyEquivalent: "")
@@ -422,14 +628,23 @@ final class App: NSObject, NSApplicationDelegate {
     let guide = GuideWindow()
     lazy var about = AboutWindow()
     var state = ""
+    var awaySince: Date?
+    var goLiveOk = false
+    var goLiveBusy = false
+    var goLiveQuietUntil = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        installEditMenu()
         let m = NSMenu()
         m.autoenablesItems = false
         statusLine.isEnabled = false
         m.addItem(statusLine)
         lanLine.isEnabled = false
         m.addItem(lanLine)
+        twitchLine.isEnabled = false
+        m.addItem(twitchLine)
+        xLine.isEnabled = false
+        m.addItem(xLine)
         twitchWarn.isEnabled = false
         m.addItem(twitchWarn)
         m.addItem(.separator())
@@ -441,19 +656,32 @@ final class App: NSObject, NSApplicationDelegate {
         m.addItem(modeTwitch)
         copyIP.target = self
         m.addItem(copyIP)
+        alsoTwitch.target = self
+        m.addItem(alsoTwitch)
+        m.addItem(autoLiveItem)
+        m.addItem(announceItem)
+        m.addItem(loginItem)
         m.addItem(.separator())
         m.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         m.addItem(NSMenuItem(title: "Setup Guide…", action: #selector(openGuide), keyEquivalent: ""))
         m.addItem(NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: ""))
         m.addItem(NSMenuItem(title: "Open X Live Studio", action: #selector(openStudio), keyEquivalent: ""))
+        m.addItem(broadcastItem)
         m.addItem(NSMenuItem(title: "Help", action: #selector(openHelp), keyEquivalent: ""))
         m.addItem(NSMenuItem(title: "About / Licenses", action: #selector(openAbout), keyEquivalent: ""))
         m.addItem(.separator())
         m.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         m.items.forEach { if $0.action != nil { $0.target = self } }
         item.menu = m
+        XLive.log = { appLog($0) }
+        XLive.restoreSession()
+        settings.onAccount = { [weak self] in
+            self?.goLiveOk = false
+            self?.goLiveQuietUntil = .distantPast
+            self?.noteStream(self?.state ?? "idle")
+        }
         apply("idle")
-        refresh()
+        syncLogin()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
         // LAN-mode DNS runs the whole time the app is open, independent of the relay.
         ensureDNS()
@@ -461,16 +689,59 @@ final class App: NSObject, NSApplicationDelegate {
         guide.openSettings = { [weak self] in self?.openSettings() }
         guide.startRelay = { [weak self] in self?.start() }
         if !Store.complete { guide.present() }
+        if Store.relayWanted { begin(restoring: true) }
+        else { refresh() }
+    }
+
+    /// Command-V only works if the app has an Edit menu. Status-item apps do not get one.
+    func installEditMenu() {
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        let quitItem = appMenu.addItem(withTitle: "Quit PS5 X Live", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        appItem.submenu = appMenu
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        let main = NSMenu()
+        main.addItem(appItem)
+        main.addItem(editItem)
+        NSApp.mainMenu = main
     }
 
     func refresh() {
         DispatchQueue.global().async {
             let s = relay(["status"]).1
-            DispatchQueue.main.async { self.apply(s) }
+            let tw = (Store.lanMode && Store.simulcast) ? relay(["twitch-status"]).1 : ""
+            DispatchQueue.main.async {
+                self.apply(s)
+                self.applyTwitch(tw)
+                self.noteStream(s)
+                self.syncLogin()
+            }
         }
+    }
+    func applyTwitch(_ t: String) {
+        guard Store.lanMode && Store.simulcast else { twitchLine.isHidden = true; return }
+        switch t {
+        case "sending": twitchLine.title = "Twitch: sending"
+        case "error": twitchLine.title = "Twitch: error (retrying)"
+        case "starting": twitchLine.title = "Twitch: starting…"
+        default: twitchLine.title = "Twitch: idle"
+        }
+        twitchLine.isHidden = false
     }
 
     func apply(_ s: String) {
+        startItem.isEnabled = s == "idle"
+        stopItem.isEnabled = s != "idle" || Store.relayWanted
         guard s != state else { return }
         state = s
         let symbol: String
@@ -484,8 +755,6 @@ final class App: NSObject, NSApplicationDelegate {
         img?.isTemplate = tint == nil
         item.button?.image = img
         item.button?.contentTintColor = tint
-        startItem.isEnabled = s == "idle"
-        stopItem.isEnabled = s != "idle"
         syncMode()
     }
 
@@ -495,6 +764,12 @@ final class App: NSObject, NSApplicationDelegate {
         lanLine.isHidden = !Store.lanMode
         twitchWarn.isHidden = Store.lanMode
         copyIP.isHidden = !Store.lanMode
+        alsoTwitch.isHidden = !Store.lanMode
+        alsoTwitch.state = Store.simulcast ? .on : .off
+        autoLiveItem.state = Store.autoLive ? .on : .off
+        announceItem.state = Store.announce ? .on : .off
+        broadcastItem.isEnabled = !Store.shareURL.isEmpty
+        twitchLine.isHidden = !(Store.lanMode && Store.simulcast)
         if Store.lanMode {
             // Overrides are active only while the relay runs; idle means the PS5 reaches Twitch normally.
             if state == "idle" {
@@ -518,12 +793,14 @@ final class App: NSObject, NSApplicationDelegate {
 
     func switchMode(_ m: String) {
         guard Store.mode != m else { return }
+        let resume = Store.relayWanted
         DispatchQueue.global().async {
             relay(["stop"])
             if m == "lan" { relay(["dns-start"], env: ["PS5XL_LAN_IP": lanIP()]) } else { relay(["dns-stop"]) }
             DispatchQueue.main.async {
-                Store.mode = m; self.cachedIP = ""; self.syncMode(); self.guide.rebuild()
+                Store.mode = m; self.cachedIP = ""; self.goLiveOk = false; self.syncMode(); self.guide.rebuild()
                 if !Store.complete { self.settings.present() }
+                else if resume { self.begin(restoring: true) }
                 else if Store.lanMode { self.guide.present() }
             }
         }
@@ -537,6 +814,120 @@ final class App: NSObject, NSApplicationDelegate {
         a.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         return a.runModal() == .alertFirstButtonReturn
+    }
+    @objc func toggleAutoLive() {
+        Store.autoLive.toggle()
+        goLiveOk = false
+        goLiveQuietUntil = .distantPast
+        syncMode()
+        noteStream(state)
+    }
+    @objc func toggleAnnounce() {
+        Store.announce.toggle()
+        syncMode()
+    }
+    @objc func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            let a = NSAlert()
+            a.messageText = "Couldn't change Open at Login"
+            a.informativeText = error.localizedDescription
+            a.runModal()
+        }
+        syncLogin()
+        if SMAppService.mainApp.status == .requiresApproval {
+            let a = NSAlert()
+            a.messageText = "Approve Open at Login"
+            a.informativeText = "macOS is waiting for you to allow PS5 X Live in System Settings → General → Login Items."
+            a.addButton(withTitle: "Open Login Items")
+            a.addButton(withTitle: "OK")
+            if a.runModal() == .alertFirstButtonReturn { openURL(Links.loginItems) }
+        }
+    }
+    func syncLogin() {
+        let status = SMAppService.mainApp.status
+        loginItem.state = status == .enabled ? .on : .off
+        loginItem.title = status == .requiresApproval ? "Open at Login (approval needed)" : "Open at Login"
+    }
+
+    func xStatus(_ title: String) {
+        xLine.title = title.count > 80 ? String(title.prefix(77)) + "…" : title
+    }
+
+    /// When the PS5's video is actually flowing, publish on X. POST /2/broadcasts
+    /// returns the source's current live broadcast (rejoin) or starts a new one.
+    func noteStream(_ s: String) {
+        let up = s == "relaying"
+        if up {
+            awaySince = nil
+            guard Store.autoLive else {
+                if !goLiveOk { xStatus("X: auto go live is off") }
+                return
+            }
+            guard XLive.signedIn else {
+                xStatus("X: sign in to go live")
+                return
+            }
+            if goLiveOk { return }
+            considerGoLive()
+        } else {
+            if awaySince == nil { awaySince = Date() }
+            if let t = awaySince, Date().timeIntervalSince(t) >= 20 { goLiveOk = false }
+            guard !goLiveOk else { return }
+            if !XLive.signedIn { xStatus("X: not signed in") }
+            else if !Store.autoLive { xStatus("X: auto go live is off") }
+            else if Store.relayWanted { xStatus("X: waiting for the PS5") }
+            else { xStatus("X: idle") }
+        }
+    }
+
+    func considerGoLive() {
+        guard !goLiveBusy, Date() >= goLiveQuietUntil else { return }
+        goLiveBusy = true
+        xStatus("X: going live…")
+        let title = Store.liveTitle
+        let announce = Store.announce
+        DispatchQueue.global().async {
+            let result = XLive.publish(title: title, announce: announce, streamKey: Store.key)
+            DispatchQueue.main.async {
+                self.goLiveBusy = false
+                switch result {
+                case .created(let id, let share):
+                    self.goLiveOk = true
+                    Store.shareURL = share ?? ""
+                    self.xStatus("X: live")
+                    appLog("X live: started broadcast \(id)")
+                case .rejoined(let id, let share):
+                    self.goLiveOk = true
+                    if let share, !share.isEmpty { Store.shareURL = share }
+                    self.xStatus("X: rejoined")
+                    appLog("X live: rejoined broadcast \(id)")
+                case .retry(let msg):
+                    self.goLiveQuietUntil = Date().addingTimeInterval(12)
+                    self.xStatus("X: " + msg)
+                    appLog("X live: retry \(msg)")
+                case .failed(let msg):
+                    self.goLiveQuietUntil = Date().addingTimeInterval(45)
+                    self.xStatus("X: " + msg)
+                    appLog("X live: \(msg)")
+                }
+                self.broadcastItem.isEnabled = !Store.shareURL.isEmpty
+            }
+        }
+    }
+
+    @objc func toggleSimulcast() {
+        Store.simulcast.toggle()
+        let on = Store.simulcast
+        DispatchQueue.global().async {
+            relay([on ? "twitch-on" : "twitch-off"])
+            DispatchQueue.main.async { self.syncMode(); self.refresh() }
+        }
     }
     @objc func setTwitch() { if confirmTwitchRisk() { switchMode("twitch") } }
     @objc func setLan() { switchMode("lan") }
@@ -557,21 +948,44 @@ final class App: NSObject, NSApplicationDelegate {
         return false
     }
 
-    @objc func start() {
-        if !Store.lanMode && !confirmTwitchRisk() { return }
-        guard checkTools() else { return }
-        guard Store.complete else {
-            settings.onSave = { [weak self] in self?.start() }
-            return settings.present()
+    @objc func start() { begin(restoring: false) }
+
+    /// `restoring` skips the Twitch warning and the missing-tool alert. Start Relay
+    /// already confirmed those, and the choice is what we bring back after a reboot.
+    func begin(restoring: Bool) {
+        if !restoring && !Store.lanMode && !confirmTwitchRisk() { return }
+        if restoring {
+            if !missingTools().isEmpty {
+                appLog("relay not restored: a bundled tool is missing")
+                return
+            }
+        } else if !checkTools() {
+            return
         }
+        guard Store.complete else {
+            if !restoring {
+                settings.onSave = { [weak self] in self?.start() }
+                settings.present()
+            }
+            return
+        }
+        Store.relayWanted = true
+        if restoring { appLog("restoring relay (left on)") }
         var env = ["PS5XL_MODE": Store.mode, "PS5XL_SERVER": Store.server, "PS5XL_KEY": Store.key]
         if Store.lanMode { env["PS5XL_LAN_IP"] = lanIP() } else { env["PS5XL_CHANNEL"] = Store.channel }
         apply("waiting")
         if Store.lanMode { ensureDNS() }
-        DispatchQueue.global().async { relay(["start"], env: env); self.refresh() }
+        DispatchQueue.global().async {
+            if Store.lanMode { relay([Store.simulcast ? "twitch-on" : "twitch-off"]) }
+            relay(["start"], env: env); self.refresh()
+        }
     }
 
-    @objc func stop() { DispatchQueue.global().async { relay(["stop"]); self.refresh() } }
+    @objc func stop() {
+        Store.relayWanted = false
+        goLiveOk = false
+        DispatchQueue.global().async { relay(["stop"]); self.refresh() }
+    }
     @objc func openSettings() { settings.present() }
     @objc func openLog() {
         if !FileManager.default.fileExists(atPath: logPath) { FileManager.default.createFile(atPath: logPath, contents: nil) }
@@ -580,11 +994,35 @@ final class App: NSObject, NSApplicationDelegate {
     @objc func openGuide() { guide.present() }
     @objc func openAbout() { about.present() }
     @objc func openStudio() { openURL(Links.liveStudio) }
+    @objc func openBroadcast() { openURL(Store.shareURL) }
     @objc func openHelp() { openURL(Links.readme) }
+    /// Quit stops the processes. relayWanted stays set, so the next launch turns the relay back on.
     @objc func quit() { relay(["stop"]); relay(["dns-stop"]); NSApp.terminate(nil) }
 }
 
+private let appLogLock = NSLock()
+func appLog(_ message: String) {
+    appLogLock.lock()
+    defer { appLogLock.unlock() }
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    var text = message.replacingOccurrences(of: #"Bearer [A-Za-z0-9%._\-]+"#, with: "Bearer ***", options: .regularExpression)
+    let key = Store.key
+    if !key.isEmpty { text = text.replacingOccurrences(of: key, with: "***") }
+    let line = stamp + " " + text + "\n"
+    if let handle = FileHandle(forWritingAtPath: logPath) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+    } else {
+        FileManager.default.createFile(atPath: logPath, contents: Data(line.utf8))
+    }
+}
+
 // MARK: - Entry
+
+if CommandLine.arguments.contains("--selftest") {
+    exit(XLive.selfTest() ? 0 : 1)
+}
 
 // `--import DIR` reads twitch_channel, x_ingest_url and x_stream_key files from DIR
 // into the app's settings and Keychain, then exits. Useful for scripted setup.
