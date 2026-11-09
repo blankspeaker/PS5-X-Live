@@ -220,7 +220,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         server.placeholderString = "rtmps://"
         key.placeholderString = "Stream key"
         xUser.placeholderString = "Filled in when you sign in"
-        liveTitle.placeholderString = "Optional"
+        liveTitle.placeholderString = "Used only if the PS5 title can't be read"
         clientID.placeholderString = "From your X app"
         clientSecret.placeholderString = "Blank for a public client"
         for f in [channel, server, key, xUser, liveTitle, clientID, clientSecret] as [NSTextField] {
@@ -242,7 +242,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
             [NSTextField(labelWithString: "Server URL"), server],
             [NSTextField(labelWithString: "Stream key"), key],
             [NSTextField(labelWithString: "X username"), xUser],
-            [NSTextField(labelWithString: "Livestream title"), liveTitle],
+            [NSTextField(labelWithString: "Fallback title"), liveTitle],
             [NSTextField(labelWithString: "X Client ID"), idRow],
             [NSTextField(labelWithString: "X Client Secret"), secretRow],
         ])
